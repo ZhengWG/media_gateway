@@ -74,7 +74,7 @@ async fn preprocess_local_file_not_found_returns_400() {
     };
     let router = app::build_router(state);
     let payload = serde_json::json!({
-        "model": "demo",
+        "model": "Qwen/Qwen2.5-VL-3B-Instruct",
         "messages": [{
             "role": "user",
             "content": [{
@@ -106,7 +106,7 @@ async fn preprocess_bad_base64_returns_400() {
     };
     let router = app::build_router(state);
     let payload = serde_json::json!({
-        "model": "demo",
+        "model": "Qwen/Qwen2.5-VL-3B-Instruct",
         "messages": [{
             "role": "user",
             "content": [{
@@ -139,7 +139,7 @@ async fn preprocess_non_image_payload_returns_500() {
     let router = app::build_router(state);
     let bad_bytes = base64::engine::general_purpose::STANDARD.encode(b"not-an-image");
     let payload = serde_json::json!({
-        "model": "demo",
+        "model": "Qwen/Qwen2.5-VL-3B-Instruct",
         "messages": [{
             "role": "user",
             "content": [{
@@ -202,7 +202,7 @@ async fn proxy_mode_forwards_with_skip_header() {
     let b64 = base64::engine::general_purpose::STANDARD.encode(&buf);
     let payload = serde_json::json!({
         "upstream_url": format!("http://{addr}"),
-        "model": "demo",
+        "model": "Qwen/Qwen2.5-VL-3B-Instruct",
         "messages": [{
             "role": "user",
             "content": [{
@@ -234,7 +234,7 @@ async fn preprocess_supports_sglang_audio_url_shape() {
     };
     let router = app::build_router(state);
     let payload = serde_json::json!({
-        "model": "demo",
+        "model": "moonshotai/Kimi-VL-A3B-Instruct",
         "messages": [{
             "role": "user",
             "content": [{
@@ -251,6 +251,34 @@ async fn preprocess_supports_sglang_audio_url_shape() {
         .expect("request");
     let resp = router.oneshot(req).await.expect("response");
     assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn preprocess_rejects_non_qwen_kimi_model() {
+    let cfg = test_config();
+    let state = app::AppState {
+        registry: models::ModelRegistry::from_config(&cfg),
+        http_client: reqwest::Client::new(),
+        metrics_handle: test_metrics_handle(),
+        config: cfg,
+        hf_sidecar: None,
+    };
+    let router = app::build_router(state);
+    let payload = serde_json::json!({
+        "model": "meta-llama/Llama-3.2-11B-Vision",
+        "messages": [{
+            "role": "user",
+            "content": [{"type":"text","text":"hello"}]
+        }]
+    });
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/preprocess")
+        .header("content-type", "application/json")
+        .body(Body::from(payload.to_string()))
+        .expect("request");
+    let resp = router.oneshot(req).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -298,7 +326,7 @@ async fn preprocess_injects_processor_output_from_sidecar_when_enabled() {
     };
     let router = app::build_router(state);
     let payload = serde_json::json!({
-        "model": "demo",
+        "model": "Qwen/Qwen2.5-VL-3B-Instruct",
         "messages": [{
             "role": "user",
             "content": [{
@@ -341,7 +369,7 @@ async fn proxy_mode_requires_upstream_url_in_body() {
     };
     let router = app::build_router(state);
     let payload = serde_json::json!({
-        "model": "demo",
+        "model": "Qwen/Qwen2.5-VL-3B-Instruct",
         "messages": [{
             "role": "user",
             "content": [{"type":"text","text":"hello"}]

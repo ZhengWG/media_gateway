@@ -11,6 +11,11 @@
 - 处理后仍回写 OpenAI 兼容形状（`image_url/video_url/audio_url` 的 data URL）。
 - 在 proxy 模式下转发到 SGLang `/v1/chat/completions`（上游地址从请求 JSON 中读取）。
 
+### 1.1 当前支持模型范围（已收敛）
+
+- 仅支持 **Qwen 系列** 与 **Kimi 系列** 模型。
+- `model` 字段若不属于这两类，将返回 `400 Bad Request`。
+
 ## 2. 与 SGLang `/v1/chat/completions` 的兼容策略
 
 ### 2.1 已适配原则
