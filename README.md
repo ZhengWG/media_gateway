@@ -249,6 +249,38 @@ export HF_SIDECAR_TIMEOUT_MS=60000
 
 如果 sidecar 需要 `transformers/torch/opencv` 等第三方库，确保上述 Python 环境已安装对应依赖。
 
+### 10.7 HF sidecar 实际可用脚本（AutoProcessor）
+
+仓库提供了一个可直接运行的示例脚本：`scripts/hf_processor_sidecar.py`。  
+脚本协议与网关一致：从 stdin 读取一行 JSON，输出一行 JSON。
+
+#### 10.7.1 依赖安装
+
+```bash
+python3 -m pip install -U transformers pillow requests torch
+```
+
+#### 10.7.2 启动参数（环境变量）
+
+- `HF_MODEL_ID`：默认模型（例如 `Qwen/Qwen2.5-VL-3B-Instruct`）
+- `HF_DEVICE`：`cpu` 或 `cuda`（默认 `cpu`）
+- `HF_TRUST_REMOTE_CODE`：`0/1`（默认 `0`）
+- `HF_PROCESSOR_OUTPUT_MODE`：`passthrough | processed_data_url`
+  - `passthrough`：保持原 URL（最安全）
+  - `processed_data_url`：对 image 走 `AutoProcessor(..., return_tensors="pt")` 后，将 pixel_values 的首张张量近似回编码为 data URL
+
+#### 10.7.3 与网关联动
+
+```bash
+export HF_PROCESSOR_MODE=python_sidecar
+export HF_PYTHON_BIN="/opt/venv/bin/python"
+export HF_SIDECAR_SCRIPT="/workspace/scripts/hf_processor_sidecar.py"
+export HF_SIDECAR_COMMAND_TEMPLATE='source /opt/venv/bin/activate && export HF_MODEL_ID=Qwen/Qwen2.5-VL-3B-Instruct && {python_bin} {script_path}'
+```
+
+> 说明：`processed_data_url` 模式用于演示如何调用 HF `AutoProcessor`。  
+> 严格生产语义仍建议在你们与引擎约定的“processor_output/skip 契约”下落地，避免回编码带来的信息损失。
+
 ### 10.5 错误样例（应返回 400）
 
 本地文件不存在：
