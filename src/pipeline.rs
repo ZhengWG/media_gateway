@@ -62,6 +62,7 @@ pub async fn preprocess_request(
                 &profile,
                 http_client,
                 hf_sidecar,
+                cfg.inject_processor_output,
                 profile.max_media_bytes,
                 cfg.fetch_timeout,
                 &cfg.allowed_hosts,
@@ -103,6 +104,7 @@ async fn process_part(
     profile: &crate::config::ModelProfile,
     http_client: &reqwest::Client,
     hf_sidecar: Option<&HfSidecarClient>,
+    inject_processor_output: bool,
     max_media_bytes: usize,
     fetch_timeout: std::time::Duration,
     allowed_hosts: &std::collections::HashSet<String>,
@@ -121,6 +123,7 @@ async fn process_part(
             "model": model_id,
             "kind": kind.as_str(),
             "url": raw_url,
+            "need_processor_output": inject_processor_output,
         });
         let sidecar_res = sidecar.preprocess(model_id, &sidecar_input).await?;
         let sidecar_url = sidecar_res
@@ -129,6 +132,11 @@ async fn process_part(
             .and_then(Value::as_str)
             .ok_or_else(|| GatewayError::Internal("hf sidecar payload missing url".to_string()))?;
         media_obj.insert("url".to_string(), Value::String(sidecar_url.to_string()));
+        if inject_processor_output {
+            if let Some(processor_output) = sidecar_res.processor_output {
+                media_obj.insert("processor_output".to_string(), processor_output);
+            }
+        }
         metrics::counter!("media_gateway_media_processed_total", "kind" => kind.as_str())
             .increment(1);
         return Ok(true);

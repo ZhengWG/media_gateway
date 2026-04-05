@@ -45,6 +45,7 @@ fn test_config() -> config::AppConfig {
         hf_python_bin: "python3".to_string(),
         hf_sidecar_script: "scripts/hf_processor_sidecar.py".to_string(),
         hf_sidecar_timeout: Duration::from_secs(30),
+        inject_processor_output: false,
     }
 }
 
@@ -250,6 +251,74 @@ async fn preprocess_supports_sglang_audio_url_shape() {
         .expect("request");
     let resp = router.oneshot(req).await.expect("response");
     assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn preprocess_injects_processor_output_from_sidecar_when_enabled() {
+    let sidecar_app = Router::new().route(
+        "/sidecar",
+        post(|Json(_payload): Json<serde_json::Value>| async move {
+            Json(serde_json::json!({
+                "payload": {
+                    "url": "data:application/octet-stream;base64,aGVsbG8="
+                },
+                "changed_items": 1,
+                "processor_output": {
+                    "pixel_values": [[[[0.1, 0.2], [0.3, 0.4]]]]
+                }
+            }))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind sidecar");
+    let addr = listener.local_addr().expect("sidecar addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, sidecar_app).await;
+    });
+
+    let mut cfg = test_config();
+    cfg.hf_processor_mode = config::HfProcessorMode::PythonSidecar;
+    cfg.inject_processor_output = true;
+    cfg.hf_sidecar_command_template = format!(
+        "python3 -c \"import json,sys,urllib.request; req=json.loads(sys.stdin.readline()); r=urllib.request.Request('http://{addr}/sidecar', data=json.dumps(req).encode('utf-8'), headers={{'content-type':'application/json'}}); print(urllib.request.urlopen(r, timeout=5).read().decode('utf-8'))\""
+    );
+
+    let state = app::AppState {
+        registry: models::ModelRegistry::from_config(&cfg),
+        http_client: reqwest::Client::new(),
+        metrics_handle: test_metrics_handle(),
+        config: cfg.clone(),
+        hf_sidecar: Some(hf_sidecar::HfSidecarClient::new(
+            cfg.hf_sidecar_command_template.clone(),
+            cfg.hf_sidecar_timeout,
+        )),
+    };
+    let router = app::build_router(state);
+    let payload = serde_json::json!({
+        "model": "demo",
+        "messages": [{
+            "role": "user",
+            "content": [{
+                "type": "image_url",
+                "image_url": { "url": "data:image/png;base64,aGVsbG8=" }
+            }]
+        }]
+    });
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/preprocess")
+        .header("content-type", "application/json")
+        .body(Body::from(payload.to_string()))
+        .expect("request");
+    let resp = router.oneshot(req).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let v: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    let part = &v["payload"]["messages"][0]["content"][0]["image_url"];
+    assert!(part.get("processor_output").is_some());
 }
 
 #[tokio::test]

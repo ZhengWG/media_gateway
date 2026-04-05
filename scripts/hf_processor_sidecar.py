@@ -40,6 +40,7 @@ from typing import Any, Dict, Optional, Tuple
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+import numpy as np
 from PIL import Image
 from transformers import AutoProcessor
 
@@ -203,6 +204,42 @@ def _pixel_values_to_bytes(pixel_values: Any) -> bytes:
     return arr.astype("float32", copy=False).tobytes(order="C")
 
 
+def _serialize_processor_value(value: Any) -> Any:
+    if hasattr(value, "detach") and hasattr(value, "cpu"):
+        value = value.detach().cpu()
+    if hasattr(value, "numpy"):
+        value = value.numpy()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, (list, tuple)):
+        return [_serialize_processor_value(v) for v in value]
+    if isinstance(value, dict):
+        return {str(k): _serialize_processor_value(v) for k, v in value.items()}
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except Exception:  # noqa: BLE001
+            pass
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def _extract_processor_output(enc: Any) -> Dict[str, Any]:
+    if hasattr(enc, "items"):
+        items = enc.items()
+    elif isinstance(enc, dict):
+        items = enc.items()
+    else:
+        return {}
+    out: Dict[str, Any] = {}
+    for k, v in items:
+        if k in {"input_ids", "attention_mask", "token_type_ids"}:
+            continue
+        out[str(k)] = _serialize_processor_value(v)
+    return out
+
+
 def _process_image_with_hf(processor: Any, raw: bytes) -> Tuple[bytes, str]:
     # Reuse HF call path for model-specific image preprocess interface and emit pixel_values bytes.
     img = Image.open(io.BytesIO(raw)).convert("RGB")
@@ -239,6 +276,37 @@ def _process_image_with_hf(processor: Any, raw: bytes) -> Tuple[bytes, str]:
     return bytes_payload, mime
 
 
+def _run_hf_for_video(processor: Any, media_path: str) -> Any:
+    attempts = [
+        {"videos": [media_path], "return_tensors": "pt"},
+        {"text": "", "videos": [media_path], "return_tensors": "pt"},
+        {"text": [""], "videos": [media_path], "return_tensors": "pt"},
+    ]
+    last_err: Optional[Exception] = None
+    for kwargs in attempts:
+        try:
+            return processor(**kwargs)
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+    raise ValueError(f"HF video processor call failed: {last_err}")
+
+
+def _run_hf_for_audio(processor: Any, media_path: str) -> Any:
+    attempts = [
+        {"audios": [media_path], "return_tensors": "pt"},
+        {"audio": [media_path], "return_tensors": "pt"},
+        {"text": "", "audios": [media_path], "return_tensors": "pt"},
+        {"text": "", "audio": [media_path], "return_tensors": "pt"},
+    ]
+    last_err: Optional[Exception] = None
+    for kwargs in attempts:
+        try:
+            return processor(**kwargs)
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+    raise ValueError(f"HF audio processor call failed: {last_err}")
+
+
 def _handle(req: Dict[str, Any]) -> Dict[str, Any]:
     model_id = req["model_id"]
     payload = req["payload"]
@@ -246,6 +314,7 @@ def _handle(req: Dict[str, Any]) -> Dict[str, Any]:
     url = payload.get("url")
     if not model_id or not kind or not url:
         raise ValueError("missing model_id/kind/url")
+    need_processor_output = bool(payload.get("need_processor_output", False))
 
     loader = MediaLoader()
     payload_obj = loader.load(url)
@@ -253,10 +322,15 @@ def _handle(req: Dict[str, Any]) -> Dict[str, Any]:
     capabilities = _detect_capabilities(processor)
     mime, raw = payload_obj.mime, payload_obj.data
     path = "passthrough"
+    processor_output: Optional[Dict[str, Any]] = None
 
     if kind == "image":
         if not capabilities.image:
             raise ValueError(f"processor for {model_id} does not support image inputs")
+        if need_processor_output:
+            img = Image.open(io.BytesIO(raw)).convert("RGB")
+            enc = processor(images=[img], text=[""], return_tensors="pt")
+            processor_output = _extract_processor_output(enc)
         processed, mime = _process_image_with_hf(processor, raw)
         path = "image_processor"
     elif kind == "video":
@@ -264,7 +338,11 @@ def _handle(req: Dict[str, Any]) -> Dict[str, Any]:
             with tempfile.NamedTemporaryFile(suffix=".mp4", delete=True) as tmp:
                 tmp.write(raw)
                 tmp.flush()
-                _call_video_processor(processor, tmp.name)
+                if need_processor_output:
+                    enc = _run_hf_for_video(processor, tmp.name)
+                    processor_output = _extract_processor_output(enc)
+                else:
+                    _call_video_processor(processor, tmp.name)
             path = "video_processor"
         processed = raw
     elif kind == "audio":
@@ -272,7 +350,11 @@ def _handle(req: Dict[str, Any]) -> Dict[str, Any]:
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as tmp:
                 tmp.write(raw)
                 tmp.flush()
-                _call_audio_processor(processor, tmp.name)
+                if need_processor_output:
+                    enc = _run_hf_for_audio(processor, tmp.name)
+                    processor_output = _extract_processor_output(enc)
+                else:
+                    _call_audio_processor(processor, tmp.name)
             path = "audio_processor"
         processed = raw
     else:
@@ -292,6 +374,7 @@ def _handle(req: Dict[str, Any]) -> Dict[str, Any]:
             },
         },
         "changed_items": 1,
+        "processor_output": processor_output,
     }
 
 

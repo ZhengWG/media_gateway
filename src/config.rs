@@ -66,6 +66,7 @@ pub struct AppConfig {
     pub hf_sidecar_script: String,
     pub hf_sidecar_command_template: String,
     pub hf_sidecar_timeout: Duration,
+    pub inject_processor_output: bool,
     pub default_profile: ModelProfile,
     pub model_profiles: HashMap<String, ModelProfile>,
 }
@@ -108,6 +109,7 @@ impl AppConfig {
         let hf_sidecar_command_template =
             env_or("HF_SIDECAR_COMMAND_TEMPLATE", "{python_bin} {script_path}");
         let hf_sidecar_timeout_ms = env_parse("HF_SIDECAR_TIMEOUT_MS", request_timeout_ms)?;
+        let inject_processor_output = env_parse("INJECT_PROCESSOR_OUTPUT", false)?;
 
         let default_profile = ModelProfile {
             target_image_edge: env_parse("DEFAULT_TARGET_IMAGE_EDGE", 1024_u32)?,
@@ -129,6 +131,7 @@ impl AppConfig {
             hf_sidecar_script,
             hf_sidecar_command_template,
             hf_sidecar_timeout: Duration::from_millis(hf_sidecar_timeout_ms),
+            inject_processor_output,
             default_profile,
             model_profiles,
         })
