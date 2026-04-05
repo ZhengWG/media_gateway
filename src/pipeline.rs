@@ -87,6 +87,7 @@ fn detect_media_kind(part_type: &str) -> Option<(&'static str, MediaKind)> {
         "image_url" => Some(("image_url", MediaKind::Image)),
         "video_url" => Some(("video_url", MediaKind::Video)),
         "audio" => Some(("audio", MediaKind::Audio)),
+        "audio_url" => Some(("audio_url", MediaKind::Audio)),
         _ => None,
     }
 }

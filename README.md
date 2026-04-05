@@ -54,7 +54,16 @@
 - 网关保持 Rust 控制面与协议编排。
 - 当 sidecar 可用时，网关可将 payload 发送给 sidecar，接收处理后的 payload 回写。
 
-> 说明：仓库内已放置接口与配置位；若要达到“完全 HF AutoProcessor 语义对齐”，需要你提供/落地 sidecar 脚本实现（模型加载、processor 调用、输出契约）。
+实现说明（已落地）：
+
+- 仓库包含可运行示例：`scripts/hf_processor_sidecar.py`
+- sidecar 内部对媒体加载逻辑做了抽象（本地/URL/base64）
+- 对多模态处理优先走 `AutoProcessor`（`processor(text=..., images=.../videos=.../audio=...)`）
+- 对不同模型能力自动探测并降级：
+  - 如果 processor 不支持对应模态，退回到安全默认（例如视频/音频保持原始 data URL）
+  - 并在 stderr 输出能力探测信息，便于运维定位模型差异
+
+> 不同模型在视频抽帧、音频采样、图像 resize 细节上存在差异，建议由对应模型的 `AutoProcessor` 作为语义真值来源。
 
 ## 5. 错误码策略（已按你要求）
 
