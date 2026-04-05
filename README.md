@@ -142,6 +142,104 @@ cargo run
   - 示例：
     - `source /opt/venv/bin/activate && export HF_HOME=/data/hf && {python_bin} {script_path}`
 - `HF_SIDECAR_TIMEOUT_MS`：sidecar 超时，默认跟 `REQUEST_TIMEOUT_MS` 一致
+- `INJECT_PROCESSOR_OUTPUT`：是否将 sidecar 返回的结构化 `processor_output` 注入到 `image_url/video_url/audio_url` 对象中，默认 `false`
+  - 打开后会做按模态字段白名单过滤，仅保留稳定键（避免把无关字段透传给引擎）
+
+### 8.5 启动参数组合样例（可直接复制）
+
+> 说明：以下样例均假设在仓库根目录执行 `cargo run`。  
+> 当前仅支持 Qwen/Kimi 系列模型，请确保请求里的 `model` 对应这两类。
+
+#### 样例 A：最小化本地启动（preprocess_only）
+
+用途：本地联调，只做前处理不转发。
+
+```bash
+export RUN_MODE=preprocess_only
+export BIND_ADDR=0.0.0.0:8080
+export MAX_INFLIGHT=32
+cargo run
+```
+
+#### 样例 B：proxy 模式接 SGLang（常用）
+
+用途：网关负责前处理并转发到上游（`upstream_url` 从请求体传入）。
+
+```bash
+export RUN_MODE=proxy
+export BIND_ADDR=0.0.0.0:8080
+export REQUEST_TIMEOUT_MS=60000
+export FETCH_TIMEOUT_MS=20000
+export MAX_INFLIGHT=64
+cargo run
+```
+
+#### 样例 C：严格安全策略（禁私网 + host 白名单）
+
+用途：生产环境限制外部拉流目标，降低 SSRF 风险。
+
+```bash
+export RUN_MODE=proxy
+export ALLOW_PRIVATE_NETWORK=false
+export ALLOWED_HOSTS=cdn.example.com,media.example.com
+export MAX_REQUEST_BYTES=16777216
+cargo run
+```
+
+#### 样例 D：启用 HF sidecar（独立 Python 环境）
+
+用途：把多模态前处理语义交给 HF AutoProcessor。
+
+```bash
+export RUN_MODE=proxy
+export HF_PROCESSOR_MODE=python_sidecar
+export HF_PYTHON_BIN=/opt/venv/bin/python
+export HF_SIDECAR_SCRIPT=/workspace/scripts/hf_processor_sidecar.py
+export HF_SIDECAR_COMMAND_TEMPLATE='source /opt/venv/bin/activate && export HF_HOME=/data/hf && {python_bin} {script_path}'
+export HF_SIDECAR_TIMEOUT_MS=90000
+cargo run
+```
+
+#### 样例 E：启用 processor_output 注入（SGLang 对齐路径）
+
+用途：在 data URL 回写之外，同时注入结构化 `processor_output`（白名单过滤后）。
+
+```bash
+export RUN_MODE=proxy
+export HF_PROCESSOR_MODE=python_sidecar
+export INJECT_PROCESSOR_OUTPUT=true
+export HF_PYTHON_BIN=/opt/venv/bin/python
+export HF_SIDECAR_SCRIPT=/workspace/scripts/hf_processor_sidecar.py
+cargo run
+```
+
+#### 样例 F：按模型覆盖 profile（Qwen/Kimi）
+
+用途：对不同模型设置不同图片目标边长与媒体大小上限。
+
+```bash
+export RUN_MODE=proxy
+export DEFAULT_TARGET_IMAGE_EDGE=1024
+export DEFAULT_MAX_MEDIA_BYTES=20971520
+export MODEL_PROFILES_JSON='{
+  "Qwen/Qwen2.5-VL-3B-Instruct": {"target_image_edge": 1344, "max_media_bytes": 31457280},
+  "moonshotai/Kimi-VL-A3B-Instruct": {"target_image_edge": 1120, "max_media_bytes": 20971520}
+}'
+cargo run
+```
+
+#### 样例 G：高并发压测参数（示例）
+
+用途：压测或大流量验证（需按机器 CPU/内存实际调优）。
+
+```bash
+export RUN_MODE=proxy
+export MAX_INFLIGHT=256
+export REQUEST_TIMEOUT_MS=120000
+export FETCH_TIMEOUT_MS=30000
+export MAX_REQUEST_BYTES=33554432
+cargo run
+```
 
 ## 9. API
 
