@@ -6,6 +6,7 @@ mod models;
 mod pipeline;
 
 use metrics_exporter_prometheus::PrometheusBuilder;
+use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::info;
 
@@ -24,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = AppConfig::from_env()?;
     let registry = ModelRegistry::from_config(&config);
-    let metrics_handle = PrometheusBuilder::new().install_recorder()?;
+    let metrics_handle = Arc::new(PrometheusBuilder::new().install_recorder()?);
     let http_client = reqwest::Client::builder()
         .connect_timeout(config.fetch_timeout)
         .timeout(config.request_timeout)

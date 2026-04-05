@@ -120,7 +120,8 @@ async fn process_part(
         .await?
     };
     let normalized = match kind {
-        MediaKind::Image => preprocess_image(fetched, profile.target_image_edge)?,
+        MediaKind::Image => preprocess_image(fetched, profile.target_image_edge)
+            .map_err(|e| GatewayError::Internal(format!("image preprocess failed: {e}")))?,
         MediaKind::Video | MediaKind::Audio => fetched,
     };
     media_obj.insert(

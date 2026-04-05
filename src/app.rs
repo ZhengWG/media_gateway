@@ -8,6 +8,7 @@ use axum::{
 use metrics::{counter, gauge, histogram};
 use serde::Serialize;
 use serde_json::{json, Value};
+use std::sync::Arc;
 
 use crate::config::RunMode;
 use crate::error::GatewayError;
@@ -18,7 +19,7 @@ pub struct AppState {
     pub config: crate::config::AppConfig,
     pub registry: crate::models::ModelRegistry,
     pub http_client: reqwest::Client,
-    pub metrics_handle: metrics_exporter_prometheus::PrometheusHandle,
+    pub metrics_handle: Arc<metrics_exporter_prometheus::PrometheusHandle>,
 }
 
 pub fn build_router(state: AppState) -> Router {

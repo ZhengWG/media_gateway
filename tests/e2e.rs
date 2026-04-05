@@ -1,0 +1,212 @@
+use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
+
+use axum::body::Body;
+use axum::http::{Method, Request, StatusCode};
+use axum::routing::post;
+use axum::{Json, Router};
+use base64::Engine as _;
+use tower::ServiceExt;
+
+#[path = "../src/app.rs"]
+mod app;
+#[path = "../src/config.rs"]
+mod config;
+#[path = "../src/error.rs"]
+mod error;
+#[path = "../src/media.rs"]
+mod media;
+#[path = "../src/models.rs"]
+mod models;
+#[path = "../src/pipeline.rs"]
+mod pipeline;
+
+fn test_config() -> config::AppConfig {
+    config::AppConfig {
+        bind_addr: "127.0.0.1:0".parse::<SocketAddr>().expect("addr"),
+        upstream_url: None,
+        run_mode: config::RunMode::PreprocessOnly,
+        request_timeout: Duration::from_secs(5),
+        fetch_timeout: Duration::from_secs(5),
+        max_request_bytes: 1024 * 1024,
+        max_inflight: 8,
+        allow_private_network: true,
+        allowed_hosts: HashSet::new(),
+        default_profile: config::ModelProfile {
+            target_image_edge: 32,
+            max_media_bytes: 1024 * 1024,
+        },
+        model_profiles: HashMap::new(),
+    }
+}
+
+fn test_metrics_handle() -> Arc<metrics_exporter_prometheus::PrometheusHandle> {
+    static HANDLE: OnceLock<Arc<metrics_exporter_prometheus::PrometheusHandle>> = OnceLock::new();
+    HANDLE
+        .get_or_init(|| {
+            Arc::new(
+                metrics_exporter_prometheus::PrometheusBuilder::new()
+                    .install_recorder()
+                    .expect("install metrics"),
+            )
+        })
+        .clone()
+}
+
+#[tokio::test]
+async fn preprocess_local_file_not_found_returns_400() {
+    let cfg = test_config();
+    let state = app::AppState {
+        registry: models::ModelRegistry::from_config(&cfg),
+        http_client: reqwest::Client::new(),
+        metrics_handle: test_metrics_handle(),
+        config: cfg,
+    };
+    let router = app::build_router(state);
+    let payload = serde_json::json!({
+        "model": "demo",
+        "messages": [{
+            "role": "user",
+            "content": [{
+                "type": "image_url",
+                "image_url": { "url": "file:///tmp/definitely-not-exist-12345.png" }
+            }]
+        }]
+    });
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/preprocess")
+        .header("content-type", "application/json")
+        .body(Body::from(payload.to_string()))
+        .expect("request");
+
+    let resp = router.oneshot(req).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn preprocess_bad_base64_returns_400() {
+    let cfg = test_config();
+    let state = app::AppState {
+        registry: models::ModelRegistry::from_config(&cfg),
+        http_client: reqwest::Client::new(),
+        metrics_handle: test_metrics_handle(),
+        config: cfg,
+    };
+    let router = app::build_router(state);
+    let payload = serde_json::json!({
+        "model": "demo",
+        "messages": [{
+            "role": "user",
+            "content": [{
+                "type": "image_url",
+                "image_url": { "url": "data:image/png;base64,not-base64@@@" }
+            }]
+        }]
+    });
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/preprocess")
+        .header("content-type", "application/json")
+        .body(Body::from(payload.to_string()))
+        .expect("request");
+
+    let resp = router.oneshot(req).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn preprocess_non_image_payload_returns_500() {
+    let cfg = test_config();
+    let state = app::AppState {
+        registry: models::ModelRegistry::from_config(&cfg),
+        http_client: reqwest::Client::new(),
+        metrics_handle: test_metrics_handle(),
+        config: cfg,
+    };
+    let router = app::build_router(state);
+    let bad_bytes = base64::engine::general_purpose::STANDARD.encode(b"not-an-image");
+    let payload = serde_json::json!({
+        "model": "demo",
+        "messages": [{
+            "role": "user",
+            "content": [{
+                "type": "image_url",
+                "image_url": { "url": format!("data:image/png;base64,{bad_bytes}") }
+            }]
+        }]
+    });
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/preprocess")
+        .header("content-type", "application/json")
+        .body(Body::from(payload.to_string()))
+        .expect("request");
+
+    let resp = router.oneshot(req).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn proxy_mode_forwards_with_skip_header() {
+    let upstream_app = Router::new().route(
+        "/v1/chat/completions",
+        post(
+            |headers: axum::http::HeaderMap, Json(payload): Json<serde_json::Value>| async move {
+                let skip = headers
+                    .get("x-mm-preprocessed")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_string();
+                Json(serde_json::json!({
+                    "received_skip": skip,
+                    "model": payload.get("model").and_then(|v| v.as_str()).unwrap_or_default(),
+                }))
+            },
+        ),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind upstream");
+    let addr = listener.local_addr().expect("upstream addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, upstream_app).await;
+    });
+
+    let mut cfg = test_config();
+    cfg.run_mode = config::RunMode::Proxy;
+    cfg.upstream_url = Some(format!("http://{addr}"));
+    let state = app::AppState {
+        registry: models::ModelRegistry::from_config(&cfg),
+        http_client: reqwest::Client::new(),
+        metrics_handle: test_metrics_handle(),
+        config: cfg,
+    };
+    let router = app::build_router(state);
+    let img = image::DynamicImage::new_rgb8(2, 2);
+    let mut buf = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+        .expect("png encode");
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&buf);
+    let payload = serde_json::json!({
+        "model": "demo",
+        "messages": [{
+            "role": "user",
+            "content": [{
+                "type": "image_url",
+                "image_url": { "url": format!("data:image/png;base64,{b64}") }
+            }]
+        }]
+    });
+
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/chat/completions")
+        .header("content-type", "application/json")
+        .body(Body::from(payload.to_string()))
+        .expect("request");
+    let resp = router.oneshot(req).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::OK);
+}

@@ -3,6 +3,7 @@ use image::imageops::FilterType;
 use image::{DynamicImage, ImageFormat};
 use std::io::Cursor;
 use std::net::IpAddr;
+use std::path::Path;
 use std::time::{Duration, Instant};
 use url::Url;
 
@@ -37,9 +38,9 @@ pub fn decode_data_url(raw: &str) -> Result<Option<MediaPayload>> {
     }
     let (meta, body) = raw
         .split_once(',')
-        .ok_or_else(|| GatewayError::BadRequest("invalid data url format".into()))?;
+        .ok_or_else(|| GatewayError::MediaLoad("invalid data url format".into()))?;
     if !meta.ends_with(";base64") {
-        return Err(GatewayError::BadRequest(
+        return Err(GatewayError::MediaLoad(
             "data url must use base64 encoding".into(),
         ));
     }
@@ -49,7 +50,7 @@ pub fn decode_data_url(raw: &str) -> Result<Option<MediaPayload>> {
         .to_string();
     let bytes = BASE64
         .decode(body.as_bytes())
-        .map_err(|_| GatewayError::BadRequest("invalid data url base64".into()))?;
+        .map_err(|_| GatewayError::MediaLoad("invalid data url base64".into()))?;
     Ok(Some(MediaPayload { mime, bytes }))
 }
 
@@ -63,17 +64,27 @@ pub fn encode_data_url(payload: &MediaPayload) -> String {
 
 pub async fn fetch_media(
     client: &reqwest::Client,
-    url: &str,
+    location: &str,
     max_media_bytes: usize,
     fetch_timeout: Duration,
     allowed_hosts: &std::collections::HashSet<String>,
     allow_private_network: bool,
 ) -> Result<MediaPayload> {
+    if let Some(data) = decode_data_url(location)? {
+        ensure_size_limit(data.bytes.len(), max_media_bytes)?;
+        metrics::counter!("media_fetch_total", "kind" => "data_url").increment(1);
+        return Ok(data);
+    }
+
+    if is_local_path(location) {
+        return load_local_media(location, max_media_bytes);
+    }
+
     let started = Instant::now();
     let parsed =
-        Url::parse(url).map_err(|_| GatewayError::BadRequest("invalid media url".into()))?;
+        Url::parse(location).map_err(|_| GatewayError::MediaLoad("invalid media url".into()))?;
     if parsed.scheme() != "http" && parsed.scheme() != "https" {
-        return Err(GatewayError::BadRequest(format!(
+        return Err(GatewayError::MediaLoad(format!(
             "unsupported media scheme: {}",
             parsed.scheme()
         )));
@@ -81,14 +92,14 @@ pub async fn fetch_media(
     validate_remote_url(&parsed, allowed_hosts, allow_private_network)?;
 
     let resp = client
-        .get(url)
+        .get(location)
         .timeout(fetch_timeout)
         .send()
         .await
-        .map_err(|e| GatewayError::Upstream(format!("media fetch failed: {e}")))?;
+        .map_err(map_http_load_error)?;
 
     if !resp.status().is_success() {
-        return Err(GatewayError::Upstream(format!(
+        return Err(GatewayError::MediaLoad(format!(
             "media fetch status: {}",
             resp.status()
         )));
@@ -102,11 +113,7 @@ pub async fn fetch_media(
         .map(str::trim)
         .unwrap_or("application/octet-stream")
         .to_string();
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| GatewayError::Upstream(format!("read media body failed: {e}")))?
-        .to_vec();
+    let bytes = resp.bytes().await.map_err(map_http_load_error)?.to_vec();
     ensure_size_limit(bytes.len(), max_media_bytes)?;
 
     metrics::histogram!("media_fetch_duration_seconds", "kind" => "http")
@@ -120,7 +127,7 @@ pub fn preprocess_image(payload: MediaPayload, target_edge: u32) -> Result<Media
     let started = Instant::now();
     ensure_size_limit(payload.bytes.len(), usize::MAX)?;
     let img = image::load_from_memory(&payload.bytes)
-        .map_err(|e| GatewayError::Validation(format!("decode image failed: {e}")))?;
+        .map_err(|e| GatewayError::Internal(format!("decode image failed: {e}")))?;
     let resized = resize_keep_ratio(img, target_edge);
     let mut out = Vec::new();
     resized
@@ -153,7 +160,7 @@ pub fn detect_image_format(payload: &MediaPayload) -> Result<String> {
     if b.len() >= 12 && &b[0..4] == b"RIFF" && &b[8..12] == b"WEBP" {
         return Ok("image/webp".to_string());
     }
-    Err(GatewayError::Validation(
+    Err(GatewayError::MediaLoad(
         "unsupported image format, expected jpeg/png/webp".into(),
     ))
 }
@@ -180,7 +187,7 @@ fn validate_remote_url(
 ) -> Result<()> {
     let host = url
         .host_str()
-        .ok_or_else(|| GatewayError::Validation("media url missing host".into()))?
+        .ok_or_else(|| GatewayError::MediaLoad("media url missing host".into()))?
         .to_ascii_lowercase();
 
     if !allowed_hosts.is_empty()
@@ -223,9 +230,75 @@ fn is_private_ip(ip: IpAddr) -> bool {
 
 fn ensure_size_limit(size: usize, limit: usize) -> Result<()> {
     if size > limit {
-        return Err(GatewayError::PayloadTooLarge { size, limit });
+        return Err(GatewayError::MediaLoad(format!(
+            "media payload too large: {size} > {limit}"
+        )));
     }
     Ok(())
+}
+
+fn is_local_path(location: &str) -> bool {
+    location.starts_with("file://")
+        || location.starts_with('/')
+        || location.starts_with("./")
+        || location.starts_with("../")
+}
+
+fn load_local_media(location: &str, max_media_bytes: usize) -> Result<MediaPayload> {
+    let path = if let Some(raw) = location.strip_prefix("file://") {
+        raw
+    } else {
+        location
+    };
+    let path_ref = Path::new(path);
+    if !path_ref.exists() {
+        return Err(GatewayError::MediaLoad(format!(
+            "local file not found: {}",
+            path_ref.display()
+        )));
+    }
+    if !path_ref.is_file() {
+        return Err(GatewayError::MediaLoad(format!(
+            "local path is not a file: {}",
+            path_ref.display()
+        )));
+    }
+
+    let bytes = std::fs::read(path_ref).map_err(|e| {
+        GatewayError::MediaLoad(format!(
+            "failed to read local file {}: {e}",
+            path_ref.display()
+        ))
+    })?;
+    ensure_size_limit(bytes.len(), max_media_bytes)?;
+    let mime = infer_mime_from_path(path_ref).to_string();
+    metrics::counter!("media_fetch_total", "kind" => "local_file").increment(1);
+    Ok(MediaPayload { mime, bytes })
+}
+
+fn infer_mime_from_path(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|v| v.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "webp" => "image/webp",
+        "mp4" => "video/mp4",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        _ => "application/octet-stream",
+    }
+}
+
+fn map_http_load_error(e: reqwest::Error) -> GatewayError {
+    if e.is_timeout() {
+        return GatewayError::MediaLoad("media load timeout".to_string());
+    }
+    GatewayError::MediaLoad(format!("media load failed: {e}"))
 }
 
 #[cfg(test)]

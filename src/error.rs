@@ -10,8 +10,8 @@ pub type Result<T> = std::result::Result<T, GatewayError>;
 pub enum GatewayError {
     #[error("bad request: {0}")]
     BadRequest(String),
-    #[error("validation failed: {0}")]
-    Validation(String),
+    #[error("media load failed: {0}")]
+    MediaLoad(String),
     #[error("security policy blocked request: {0}")]
     Security(String),
     #[error("payload too large: size={size}, limit={limit}")]
@@ -37,9 +37,9 @@ impl GatewayError {
     fn status_code(&self) -> StatusCode {
         match self {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
-            Self::Validation(_) => StatusCode::UNPROCESSABLE_ENTITY,
-            Self::Security(_) => StatusCode::FORBIDDEN,
-            Self::PayloadTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::MediaLoad(_) => StatusCode::BAD_REQUEST,
+            Self::Security(_) => StatusCode::BAD_REQUEST,
+            Self::PayloadTooLarge { .. } => StatusCode::BAD_REQUEST,
             Self::Upstream(_) => StatusCode::BAD_GATEWAY,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -48,7 +48,7 @@ impl GatewayError {
     fn code(&self) -> &'static str {
         match self {
             Self::BadRequest(_) => "bad_request",
-            Self::Validation(_) => "validation_error",
+            Self::MediaLoad(_) => "media_load_error",
             Self::Security(_) => "security_error",
             Self::PayloadTooLarge { .. } => "payload_too_large",
             Self::Upstream(_) => "upstream_error",
