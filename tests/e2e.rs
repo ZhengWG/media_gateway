@@ -264,7 +264,9 @@ async fn preprocess_injects_processor_output_from_sidecar_when_enabled() {
                 },
                 "changed_items": 1,
                 "processor_output": {
-                    "pixel_values": [[[[0.1, 0.2], [0.3, 0.4]]]]
+                    "pixel_values": [[[[0.1, 0.2], [0.3, 0.4]]]],
+                    "attention_mask": [1, 1, 1],
+                    "input_ids": [10, 20, 30]
                 }
             }))
         }),
@@ -319,6 +321,10 @@ async fn preprocess_injects_processor_output_from_sidecar_when_enabled() {
     let v: serde_json::Value = serde_json::from_slice(&body).expect("json");
     let part = &v["payload"]["messages"][0]["content"][0]["image_url"];
     assert!(part.get("processor_output").is_some());
+    let po = &part["processor_output"];
+    assert!(po.get("pixel_values").is_some());
+    assert!(po.get("attention_mask").is_none());
+    assert!(po.get("input_ids").is_none());
 }
 
 #[tokio::test]

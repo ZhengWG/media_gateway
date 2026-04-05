@@ -95,6 +95,45 @@ fn detect_media_kind(part_type: &str) -> Option<(&'static str, MediaKind)> {
     }
 }
 
+fn allowed_processor_output_keys(kind: MediaKind) -> &'static [&'static str] {
+    match kind {
+        // Core image fields commonly consumed by SGLang multimodal processors.
+        MediaKind::Image => &["pixel_values", "image_grid_thw", "image_sizes"],
+        // Core video fields for processor_output-like video consumption.
+        MediaKind::Video => &[
+            "pixel_values_videos",
+            "video_grid_thw",
+            "second_per_grid_ts",
+        ],
+        // Core audio fields used by HF/SGLang-style audio processor pipelines.
+        MediaKind::Audio => &[
+            "input_features",
+            "audio_features",
+            "audio_feature_lens",
+            "input_features_mask",
+            "feature_attention_mask",
+            "audio_attention_mask",
+        ],
+    }
+}
+
+fn sanitize_processor_output(kind: MediaKind, processor_output: Value) -> Option<Value> {
+    let Value::Object(obj) = processor_output else {
+        return None;
+    };
+    let mut filtered = serde_json::Map::new();
+    for key in allowed_processor_output_keys(kind) {
+        if let Some(v) = obj.get(*key) {
+            filtered.insert((*key).to_string(), v.clone());
+        }
+    }
+    if filtered.is_empty() {
+        None
+    } else {
+        Some(Value::Object(filtered))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn process_part(
     part: &mut Value,
@@ -134,7 +173,9 @@ async fn process_part(
         media_obj.insert("url".to_string(), Value::String(sidecar_url.to_string()));
         if inject_processor_output {
             if let Some(processor_output) = sidecar_res.processor_output {
-                media_obj.insert("processor_output".to_string(), processor_output);
+                if let Some(filtered) = sanitize_processor_output(kind, processor_output) {
+                    media_obj.insert("processor_output".to_string(), filtered);
+                }
             }
         }
         metrics::counter!("media_gateway_media_processed_total", "kind" => kind.as_str())
