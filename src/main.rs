@@ -33,8 +33,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .timeout(config.request_timeout)
         .build()?;
     let hf_sidecar = if config.hf_processor_mode == HfProcessorMode::PythonSidecar {
-        let cmd = format!("{} {}", config.hf_python_bin, config.hf_sidecar_script);
-        Some(HfSidecarClient::new(cmd, config.request_timeout))
+        let command = config
+            .hf_sidecar_command_template
+            .replace("{python_bin}", &config.hf_python_bin)
+            .replace("{script_path}", &config.hf_sidecar_script);
+        Some(HfSidecarClient::new(command, config.hf_sidecar_timeout))
     } else {
         None
     };

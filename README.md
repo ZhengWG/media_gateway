@@ -9,7 +9,7 @@
 - 对外提供 OpenAI 兼容入口（重点：`/v1/chat/completions`）。
 - 在网关层完成媒体加载与轻量前处理。
 - 处理后仍回写 OpenAI 兼容形状（`image_url/video_url/audio_url` 的 data URL）。
-- 在 proxy 模式下转发到 SGLang `/v1/chat/completions`。
+- 在 proxy 模式下转发到 SGLang `/v1/chat/completions`（上游地址从请求 JSON 中读取）。
 
 ## 2. 与 SGLang `/v1/chat/completions` 的兼容策略
 
@@ -72,7 +72,7 @@
 - `RUN_MODE=preprocess_only`
   - 仅返回处理后的 payload，不转发上游。
 - `RUN_MODE=proxy`
-  - 处理后转发到 `${UPSTREAM_URL}/v1/chat/completions`。
+  - 处理后转发到请求 body 的 `upstream_url` 指定地址（`${upstream_url}/v1/chat/completions`）。
 
 ## 7. 快速启动
 
@@ -88,7 +88,7 @@ cargo run
 
 - `BIND_ADDR`：监听地址，默认 `0.0.0.0:8080`
 - `RUN_MODE`：`auto | proxy | preprocess_only`，默认 `auto`
-- `UPSTREAM_URL`：上游地址（`RUN_MODE=proxy` 必填）
+  - `proxy` 模式下，目标上游地址不再读取环境变量，而是从请求 JSON body 的 `upstream_url` 字段读取
 - `REQUEST_TIMEOUT_MS`：请求超时，默认 `30000`
 - `FETCH_TIMEOUT_MS`：媒体加载超时，默认 `15000`
 - `MAX_REQUEST_BYTES`：请求体上限，默认 `16777216`
@@ -119,6 +119,15 @@ cargo run
 - `HF_PROCESSOR_MODE`：`disabled | python_sidecar`，默认 `disabled`
 - `HF_PYTHON_BIN`：Python 可执行文件，默认 `python3`
 - `HF_SIDECAR_SCRIPT`：sidecar 脚本路径，默认 `scripts/hf_processor_sidecar.py`
+- `HF_SIDECAR_COMMAND_TEMPLATE`：sidecar 命令模板，默认 `"{python_bin} {script_path}"`
+  - 支持占位符：
+    - `{python_bin}` -> `HF_PYTHON_BIN`
+    - `{script_path}` -> `HF_SIDECAR_SCRIPT`
+  - 适合需要先 `source` 虚拟环境、导出环境变量、再执行脚本的场景
+  - 支持第三方库导入（取决于你命令里激活的 Python 环境）
+  - 示例：
+    - `source /opt/venv/bin/activate && export HF_HOME=/data/hf && {python_bin} {script_path}`
+- `HF_SIDECAR_TIMEOUT_MS`：sidecar 超时，默认跟 `REQUEST_TIMEOUT_MS` 一致
 
 ## 9. API
 
@@ -197,7 +206,6 @@ curl -sS "http://127.0.0.1:8080/v1/preprocess" \
 
 ```bash
 export RUN_MODE=proxy
-export UPSTREAM_URL="http://127.0.0.1:30000"
 cargo run
 ```
 
@@ -207,6 +215,7 @@ cargo run
 curl -sS "http://127.0.0.1:8080/v1/chat/completions" \
   -H "content-type: application/json" \
   -d '{
+    "upstream_url": "http://127.0.0.1:30000",
     "model": "qwen2-vl",
     "stream": false,
     "messages": [{
@@ -219,6 +228,26 @@ curl -sS "http://127.0.0.1:8080/v1/chat/completions" \
     }]
   }'
 ```
+
+### 10.6 HF sidecar 命令配置示例（含第三方库环境）
+
+方式 A：使用默认脚本路径组合
+
+```bash
+export HF_PROCESSOR_MODE=python_sidecar
+export HF_PYTHON_BIN="/opt/venv/bin/python"
+export HF_SIDECAR_SCRIPT="/workspace/scripts/hf_processor_sidecar.py"
+```
+
+方式 B：自定义命令模板（推荐复杂环境）
+
+```bash
+export HF_PROCESSOR_MODE=python_sidecar
+export HF_SIDECAR_COMMAND_TEMPLATE='source /opt/venv/bin/activate && export HF_HOME=/data/hf && {python_bin} {script_path}'
+export HF_SIDECAR_TIMEOUT_MS=60000
+```
+
+如果 sidecar 需要 `transformers/torch/opencv` 等第三方库，确保上述 Python 环境已安装对应依赖。
 
 ### 10.5 错误样例（应返回 400）
 

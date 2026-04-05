@@ -167,17 +167,13 @@ async fn chat_completions(
         )
             .into_response(),
         RunMode::Proxy => {
+            let upstream_base = extract_upstream_url(&payload)?;
             // Preserve full SGLang-compatible fields by forwarding transformed payload as-is.
             let upstream = state
                 .http_client
                 .post(format!(
                     "{}/v1/chat/completions",
-                    state
-                        .config
-                        .upstream_url
-                        .as_deref()
-                        .unwrap_or_default()
-                        .trim_end_matches('/')
+                    upstream_base.trim_end_matches('/')
                 ))
                 .header("content-type", "application/json")
                 .header("x-mm-preprocessed", "1")
@@ -241,6 +237,40 @@ fn extract_model_id(payload: &Value) -> Result<String, GatewayError> {
         .and_then(Value::as_str)
         .map(ToString::to_string)
         .ok_or_else(|| GatewayError::BadRequest("missing field: model".to_string()))
+}
+
+fn extract_upstream_url(payload: &Value) -> Result<String, GatewayError> {
+    payload
+        .get("upstream_url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .ok_or_else(|| {
+            GatewayError::BadRequest(
+                "missing field: upstream_url (required in request body when RUN_MODE=proxy)"
+                    .to_string(),
+            )
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_upstream_url;
+
+    #[test]
+    fn extract_upstream_url_ok() {
+        let payload = serde_json::json!({"upstream_url":"http://127.0.0.1:30000"});
+        let got = extract_upstream_url(&payload).expect("upstream url");
+        assert_eq!(got, "http://127.0.0.1:30000");
+    }
+
+    #[test]
+    fn extract_upstream_url_missing() {
+        let payload = serde_json::json!({"model":"demo"});
+        let err = extract_upstream_url(&payload).expect_err("should fail");
+        assert!(format!("{err}").contains("upstream_url"));
+    }
 }
 
 async fn stream_proxy_response(upstream: reqwest::Response) -> Result<Response, GatewayError> {

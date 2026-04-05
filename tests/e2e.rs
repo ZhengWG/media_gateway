@@ -28,7 +28,6 @@ mod pipeline;
 fn test_config() -> config::AppConfig {
     config::AppConfig {
         bind_addr: "127.0.0.1:0".parse::<SocketAddr>().expect("addr"),
-        upstream_url: None,
         run_mode: config::RunMode::PreprocessOnly,
         request_timeout: Duration::from_secs(5),
         fetch_timeout: Duration::from_secs(5),
@@ -42,8 +41,10 @@ fn test_config() -> config::AppConfig {
         },
         model_profiles: HashMap::new(),
         hf_processor_mode: config::HfProcessorMode::Disabled,
+        hf_sidecar_command_template: "{python_bin} {script_path}".to_string(),
         hf_python_bin: "python3".to_string(),
-        hf_sidecar_script: "hf_sidecar.py".to_string(),
+        hf_sidecar_script: "scripts/hf_processor_sidecar.py".to_string(),
+        hf_sidecar_timeout: Duration::from_secs(30),
     }
 }
 
@@ -185,7 +186,6 @@ async fn proxy_mode_forwards_with_skip_header() {
 
     let mut cfg = test_config();
     cfg.run_mode = config::RunMode::Proxy;
-    cfg.upstream_url = Some(format!("http://{addr}"));
     let state = app::AppState {
         registry: models::ModelRegistry::from_config(&cfg),
         http_client: reqwest::Client::new(),
@@ -200,6 +200,7 @@ async fn proxy_mode_forwards_with_skip_header() {
         .expect("png encode");
     let b64 = base64::engine::general_purpose::STANDARD.encode(&buf);
     let payload = serde_json::json!({
+        "upstream_url": format!("http://{addr}"),
         "model": "demo",
         "messages": [{
             "role": "user",
@@ -249,4 +250,34 @@ async fn preprocess_supports_sglang_audio_url_shape() {
         .expect("request");
     let resp = router.oneshot(req).await.expect("response");
     assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn proxy_mode_requires_upstream_url_in_body() {
+    let cfg = test_config();
+    let mut cfg = cfg;
+    cfg.run_mode = config::RunMode::Proxy;
+    let state = app::AppState {
+        registry: models::ModelRegistry::from_config(&cfg),
+        http_client: reqwest::Client::new(),
+        metrics_handle: test_metrics_handle(),
+        config: cfg,
+        hf_sidecar: None,
+    };
+    let router = app::build_router(state);
+    let payload = serde_json::json!({
+        "model": "demo",
+        "messages": [{
+            "role": "user",
+            "content": [{"type":"text","text":"hello"}]
+        }]
+    });
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/chat/completions")
+        .header("content-type", "application/json")
+        .body(Body::from(payload.to_string()))
+        .expect("request");
+    let resp = router.oneshot(req).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }

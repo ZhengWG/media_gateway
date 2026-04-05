@@ -8,7 +8,7 @@ use crate::error::{GatewayError, Result};
 
 #[derive(Clone, Debug)]
 pub struct HfSidecarClient {
-    command: String,
+    command_template: String,
     timeout: Duration,
 }
 
@@ -32,12 +32,18 @@ struct HfSidecarResponse {
 }
 
 impl HfSidecarClient {
-    pub fn new(command: String, timeout: Duration) -> Self {
-        Self { command, timeout }
+    pub fn new(command_template: String, timeout: Duration) -> Self {
+        Self {
+            command_template,
+            timeout,
+        }
     }
 
     pub async fn preprocess(&self, model_id: &str, payload: &Value) -> Result<HfSidecarResult> {
-        let sidecar_cmd = self.command.clone();
+        let sidecar_cmd = self
+            .command_template
+            .replace("{model_id}", model_id)
+            .replace("{model}", model_id);
         let model_id = model_id.to_string();
         let payload = payload.clone();
         let task = tokio::task::spawn_blocking(move || {
