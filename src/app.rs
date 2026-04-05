@@ -1,6 +1,6 @@
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::{
     routing::{get, post},
     Json, Router,
@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use crate::config::RunMode;
 use crate::error::GatewayError;
+use crate::hf_sidecar::HfSidecarClient;
 use crate::pipeline::preprocess_request;
 
 #[derive(Clone)]
@@ -20,6 +21,7 @@ pub struct AppState {
     pub registry: crate::models::ModelRegistry,
     pub http_client: reqwest::Client,
     pub metrics_handle: Arc<metrics_exporter_prometheus::PrometheusHandle>,
+    pub hf_sidecar: Option<HfSidecarClient>,
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -102,8 +104,14 @@ async fn preprocess_only(
     gauge!("gateway_inflight").increment(1.0);
     counter!("gateway_requests_total", "route" => "preprocess", "model_id" => model_id.clone())
         .increment(1);
-    let out =
-        preprocess_request(&state.config, &state.registry, &state.http_client, payload).await?;
+    let out = preprocess_request(
+        &state.config,
+        &state.registry,
+        &state.http_client,
+        state.hf_sidecar.as_ref(),
+        payload,
+    )
+    .await?;
     histogram!("gateway_request_seconds", "route" => "preprocess", "model_id" => model_id)
         .record(begin.elapsed().as_secs_f64());
     gauge!("gateway_inflight").decrement(1.0);
@@ -123,7 +131,7 @@ async fn chat_completions(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(payload): Json<Value>,
-) -> Result<impl IntoResponse, GatewayError> {
+) -> Result<Response, GatewayError> {
     let begin = std::time::Instant::now();
     let request_id = request_id(&headers);
     let model_id = extract_model_id(&payload)?;
@@ -138,8 +146,14 @@ async fn chat_completions(
 
     gauge!("gateway_inflight").increment(1.0);
     counter!("gateway_requests_total", "route" => "chat_completions", "model_id" => model_id.clone()).increment(1);
-    let out =
-        preprocess_request(&state.config, &state.registry, &state.http_client, payload).await?;
+    let out = preprocess_request(
+        &state.config,
+        &state.registry,
+        &state.http_client,
+        state.hf_sidecar.as_ref(),
+        payload.clone(),
+    )
+    .await?;
 
     let response = match state.config.run_mode {
         RunMode::PreprocessOnly => (
@@ -153,6 +167,7 @@ async fn chat_completions(
         )
             .into_response(),
         RunMode::Proxy => {
+            // Preserve full SGLang-compatible fields by forwarding transformed payload as-is.
             let upstream = state
                 .http_client
                 .post(format!(
@@ -170,6 +185,22 @@ async fn chat_completions(
                 .send()
                 .await
                 .map_err(|e| GatewayError::Upstream(format!("upstream request failed: {e}")))?;
+
+            if payload
+                .get("stream")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                let streamed = stream_proxy_response(upstream).await?;
+                histogram!(
+                    "gateway_request_seconds",
+                    "route" => "chat_completions",
+                    "model_id" => model_id
+                )
+                .record(begin.elapsed().as_secs_f64());
+                gauge!("gateway_inflight").decrement(1.0);
+                return Ok(streamed);
+            }
             let status = axum::http::StatusCode::from_u16(upstream.status().as_u16())
                 .unwrap_or(axum::http::StatusCode::BAD_GATEWAY);
             let text = upstream
@@ -210,4 +241,29 @@ fn extract_model_id(payload: &Value) -> Result<String, GatewayError> {
         .and_then(Value::as_str)
         .map(ToString::to_string)
         .ok_or_else(|| GatewayError::BadRequest("missing field: model".to_string()))
+}
+
+async fn stream_proxy_response(upstream: reqwest::Response) -> Result<Response, GatewayError> {
+    use axum::body::Body;
+    use axum::http::header::CONTENT_TYPE;
+    use reqwest::header::HeaderMap as ReqwestHeaderMap;
+
+    let status = axum::http::StatusCode::from_u16(upstream.status().as_u16())
+        .unwrap_or(axum::http::StatusCode::BAD_GATEWAY);
+    let headers: ReqwestHeaderMap = upstream.headers().clone();
+    let content_type = headers
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("text/event-stream")
+        .to_string();
+    let bytes = upstream
+        .bytes()
+        .await
+        .map_err(|e| GatewayError::Upstream(format!("read upstream stream failed: {e}")))?;
+    let mut resp = axum::response::Response::new(Body::from(bytes));
+    *resp.status_mut() = status;
+    if let Ok(v) = axum::http::HeaderValue::from_str(&content_type) {
+        resp.headers_mut().insert(CONTENT_TYPE, v);
+    }
+    Ok(resp)
 }

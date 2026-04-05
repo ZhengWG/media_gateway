@@ -16,6 +16,8 @@ mod app;
 mod config;
 #[path = "../src/error.rs"]
 mod error;
+#[path = "../src/hf_sidecar.rs"]
+mod hf_sidecar;
 #[path = "../src/media.rs"]
 mod media;
 #[path = "../src/models.rs"]
@@ -39,6 +41,9 @@ fn test_config() -> config::AppConfig {
             max_media_bytes: 1024 * 1024,
         },
         model_profiles: HashMap::new(),
+        hf_processor_mode: config::HfProcessorMode::Disabled,
+        hf_python_bin: "python3".to_string(),
+        hf_sidecar_script: "hf_sidecar.py".to_string(),
     }
 }
 
@@ -63,6 +68,7 @@ async fn preprocess_local_file_not_found_returns_400() {
         http_client: reqwest::Client::new(),
         metrics_handle: test_metrics_handle(),
         config: cfg,
+        hf_sidecar: None,
     };
     let router = app::build_router(state);
     let payload = serde_json::json!({
@@ -94,6 +100,7 @@ async fn preprocess_bad_base64_returns_400() {
         http_client: reqwest::Client::new(),
         metrics_handle: test_metrics_handle(),
         config: cfg,
+        hf_sidecar: None,
     };
     let router = app::build_router(state);
     let payload = serde_json::json!({
@@ -125,6 +132,7 @@ async fn preprocess_non_image_payload_returns_500() {
         http_client: reqwest::Client::new(),
         metrics_handle: test_metrics_handle(),
         config: cfg,
+        hf_sidecar: None,
     };
     let router = app::build_router(state);
     let bad_bytes = base64::engine::general_purpose::STANDARD.encode(b"not-an-image");
@@ -183,6 +191,7 @@ async fn proxy_mode_forwards_with_skip_header() {
         http_client: reqwest::Client::new(),
         metrics_handle: test_metrics_handle(),
         config: cfg,
+        hf_sidecar: None,
     };
     let router = app::build_router(state);
     let img = image::DynamicImage::new_rgb8(2, 2);
@@ -204,6 +213,37 @@ async fn proxy_mode_forwards_with_skip_header() {
     let req = Request::builder()
         .method(Method::POST)
         .uri("/v1/chat/completions")
+        .header("content-type", "application/json")
+        .body(Body::from(payload.to_string()))
+        .expect("request");
+    let resp = router.oneshot(req).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn preprocess_supports_sglang_audio_url_shape() {
+    let cfg = test_config();
+    let state = app::AppState {
+        registry: models::ModelRegistry::from_config(&cfg),
+        http_client: reqwest::Client::new(),
+        metrics_handle: test_metrics_handle(),
+        config: cfg,
+        hf_sidecar: None,
+    };
+    let router = app::build_router(state);
+    let payload = serde_json::json!({
+        "model": "demo",
+        "messages": [{
+            "role": "user",
+            "content": [{
+                "type": "audio_url",
+                "audio_url": { "url": "data:audio/mpeg;base64,aGVsbG8=" }
+            }]
+        }]
+    });
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/preprocess")
         .header("content-type", "application/json")
         .body(Body::from(payload.to_string()))
         .expect("request");

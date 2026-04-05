@@ -35,6 +35,21 @@ impl RunMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HfProcessorMode {
+    Disabled,
+    PythonSidecar,
+}
+
+impl HfProcessorMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::PythonSidecar => "python_sidecar",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub bind_addr: SocketAddr,
@@ -46,6 +61,9 @@ pub struct AppConfig {
     pub max_inflight: usize,
     pub allow_private_network: bool,
     pub allowed_hosts: HashSet<String>,
+    pub hf_processor_mode: HfProcessorMode,
+    pub hf_python_bin: String,
+    pub hf_sidecar_script: String,
     pub default_profile: ModelProfile,
     pub model_profiles: HashMap<String, ModelProfile>,
 }
@@ -85,6 +103,20 @@ impl AppConfig {
         let max_inflight = env_parse("MAX_INFLIGHT", 64_usize)?;
         let allow_private_network = env_parse("ALLOW_PRIVATE_NETWORK", false)?;
         let allowed_hosts = parse_csv_set("ALLOWED_HOSTS");
+        let hf_processor_mode = match env_or("HF_PROCESSOR_MODE", "disabled")
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "disabled" => HfProcessorMode::Disabled,
+            "python_sidecar" => HfProcessorMode::PythonSidecar,
+            other => {
+                return Err(format!(
+                    "invalid HF_PROCESSOR_MODE={other}, expected disabled|python_sidecar"
+                ))
+            }
+        };
+        let hf_python_bin = env_or("HF_PYTHON_BIN", "python3");
+        let hf_sidecar_script = env_or("HF_SIDECAR_SCRIPT", "scripts/hf_processor_sidecar.py");
 
         let default_profile = ModelProfile {
             target_image_edge: env_parse("DEFAULT_TARGET_IMAGE_EDGE", 1024_u32)?,
@@ -102,6 +134,9 @@ impl AppConfig {
             max_inflight,
             allow_private_network,
             allowed_hosts,
+            hf_processor_mode,
+            hf_python_bin,
+            hf_sidecar_script,
             default_profile,
             model_profiles,
         })

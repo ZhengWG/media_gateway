@@ -1,6 +1,7 @@
 mod app;
 mod config;
 mod error;
+mod hf_sidecar;
 mod media;
 mod models;
 mod pipeline;
@@ -11,7 +12,8 @@ use tokio::net::TcpListener;
 use tracing::info;
 
 use crate::app::{build_router, AppState};
-use crate::config::AppConfig;
+use crate::config::{AppConfig, HfProcessorMode};
+use crate::hf_sidecar::HfSidecarClient;
 use crate::models::ModelRegistry;
 
 #[tokio::main]
@@ -30,11 +32,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .connect_timeout(config.fetch_timeout)
         .timeout(config.request_timeout)
         .build()?;
+    let hf_sidecar = if config.hf_processor_mode == HfProcessorMode::PythonSidecar {
+        let cmd = format!("{} {}", config.hf_python_bin, config.hf_sidecar_script);
+        Some(HfSidecarClient::new(cmd, config.request_timeout))
+    } else {
+        None
+    };
     let state = AppState {
         config: config.clone(),
         registry,
         http_client,
         metrics_handle,
+        hf_sidecar,
     };
     let app = build_router(state);
     let listener = TcpListener::bind(config.bind_addr).await?;

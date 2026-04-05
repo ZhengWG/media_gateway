@@ -1,31 +1,80 @@
 # media_gateway
 
-面向 vLLM / SGLang 的多模态前处理独立模块（首期 HTTP 版本）。
+面向 vLLM / SGLang 的多模态前处理独立模块（HTTP-first）。
 
-## 功能概览
+## 1. 当前目标与状态
 
-当前实现已覆盖架构设计中的首期关键闭环（HTTP 优先）：
+本项目当前处于“优先打通 HTTP 全链路”的阶段：
 
-- OpenAI 兼容请求解析（`/v1/chat/completions`、`/v1/preprocess`）。
-- 多模态内容识别（`messages[].content[]` 中的 `image_url` / `video_url` / `audio`）。
-- 媒体获取与规范化：
-  - 支持 `data:*;base64,...` 直接解析。
-  - 支持 `http(s)` 拉取远程媒体。
-  - 支持本地文件路径（绝对路径、`./`、`../`、`file://`）。
-  - 图片轻量前处理（按模型 profile 边长缩放并编码为 JPEG）。
-  - 视频/音频首期透传（仍封装为 data URL，便于后续 Sidecar 增强）。
-- SSRF 基础防护（host allowlist、私网地址限制）。
-- 处理后回写为 data URL，并附加 `mm_preprocessed=true` + `x-mm-preprocessed: 1` 语义标记。
-- 运行模式：
-  - `preprocess_only`：仅返回处理后的 payload。
-  - `proxy`：处理后转发到上游 OpenAI 兼容接口。
-- 可观测性接口：
-  - `GET /live`
-  - `GET /ready`
-  - `GET /health`
-  - `GET /metrics`（Prometheus）
+- 对外提供 OpenAI 兼容入口（重点：`/v1/chat/completions`）。
+- 在网关层完成媒体加载与轻量前处理。
+- 处理后仍回写 OpenAI 兼容形状（`image_url/video_url/audio_url` 的 data URL）。
+- 在 proxy 模式下转发到 SGLang `/v1/chat/completions`。
 
-## 本地运行
+## 2. 与 SGLang `/v1/chat/completions` 的兼容策略
+
+### 2.1 已适配原则
+
+- **字段透明透传**：除多模态媒体 `url` 被替换为 data URL 外，其余请求字段保持原样转发到 SGLang。
+- **多模态 shape 兼容**：
+  - `type=text`
+  - `type=image_url` + `image_url.url`
+  - `type=video_url` + `video_url.url`
+  - `type=audio_url` + `audio_url.url`（兼容 SGLang）
+  - 同时兼容历史 `audio` + `audio.url` 形状
+- **skip 协议**：追加 `x-mm-preprocessed: 1`，并在 body 写入 `mm_preprocessed=true`。
+
+### 2.2 仍需注意
+
+- 当前网关聚焦 `chat/completions`，并不声明覆盖 SGLang 的所有其它 API（如 embeddings/rerank 等）。
+- “完全一致”还依赖你部署侧 SGLang 版本与具体模型对多模态/processor_output 的支持。
+
+## 3. 媒体 load 与前处理能力
+
+### 3.1 支持的媒体来源
+
+- `data:*;base64,...`
+- `http(s)://...`
+- 本地文件路径：
+  - `file:///path/to/file`
+  - `/abs/path`
+  - `./relative/path`
+  - `../relative/path`
+
+### 3.2 轻量前处理（当前）
+
+- 图片：按模型 profile 的目标边长缩放，并编码为 `image/jpeg`。
+- 视频/音频：首期透传（只做加载与统一回写，不做重解码采样）。
+
+## 4. HF Processor 接入模式
+
+当前提供了 **HF Sidecar 预留接入位**（`hf_sidecar` 模块）：
+
+- 用于将重前处理逻辑迁移到 Python（AutoProcessor）侧实现。
+- 网关保持 Rust 控制面与协议编排。
+- 当 sidecar 可用时，网关可将 payload 发送给 sidecar，接收处理后的 payload 回写。
+
+> 说明：仓库内已放置接口与配置位；若要达到“完全 HF AutoProcessor 语义对齐”，需要你提供/落地 sidecar 脚本实现（模型加载、processor 调用、输出契约）。
+
+## 5. 错误码策略（已按你要求）
+
+- **400 Bad Request**：媒体 load 阶段问题
+  - load 超时
+  - 本地文件不存在/不可读
+  - URL 非法或不可拉取
+  - base64/data URL 异常
+  - load 数据异常（大小/格式等）
+- **500 Internal Server Error**：非 load 阶段前处理故障
+  - 例如图像 decode/encode 等内部处理异常
+
+## 6. 运行模式
+
+- `RUN_MODE=preprocess_only`
+  - 仅返回处理后的 payload，不转发上游。
+- `RUN_MODE=proxy`
+  - 处理后转发到 `${UPSTREAM_URL}/v1/chat/completions`。
+
+## 7. 快速启动
 
 ```bash
 cargo run
@@ -33,28 +82,28 @@ cargo run
 
 默认监听 `0.0.0.0:8080`。
 
-## 环境变量
+## 8. 环境变量
 
-### 基础配置
+### 8.1 基础
 
 - `BIND_ADDR`：监听地址，默认 `0.0.0.0:8080`
 - `RUN_MODE`：`auto | proxy | preprocess_only`，默认 `auto`
-- `UPSTREAM_URL`：上游引擎地址（`RUN_MODE=proxy` 必填）
-- `REQUEST_TIMEOUT_MS`：请求级超时，默认 `30000`
-- `FETCH_TIMEOUT_MS`：媒体拉取超时，默认 `15000`
-- `MAX_REQUEST_BYTES`：请求体大小上限，默认 `16777216`
-- `MAX_INFLIGHT`：并发槽位（预留参数），默认 `64`
+- `UPSTREAM_URL`：上游地址（`RUN_MODE=proxy` 必填）
+- `REQUEST_TIMEOUT_MS`：请求超时，默认 `30000`
+- `FETCH_TIMEOUT_MS`：媒体加载超时，默认 `15000`
+- `MAX_REQUEST_BYTES`：请求体上限，默认 `16777216`
+- `MAX_INFLIGHT`：并发上限，默认 `64`
 
-### 安全策略
+### 8.2 安全
 
-- `ALLOW_PRIVATE_NETWORK`：是否允许内网地址，默认 `false`
-- `ALLOWED_HOSTS`：允许的 host 白名单，逗号分隔；为空时不启用 host 白名单
+- `ALLOW_PRIVATE_NETWORK`：是否允许私网地址，默认 `false`
+- `ALLOWED_HOSTS`：host 白名单（逗号分隔）
 
-### 模型配置
+### 8.3 模型 profile
 
 - `DEFAULT_TARGET_IMAGE_EDGE`：默认图片目标边长，默认 `1024`
-- `DEFAULT_MAX_MEDIA_BYTES`：默认单媒体字节上限，默认 `20971520`
-- `MODEL_PROFILES_JSON`：按 `model_id` 覆盖 profile 的 JSON，例如：
+- `DEFAULT_MAX_MEDIA_BYTES`：默认单媒体大小上限，默认 `20971520`
+- `MODEL_PROFILES_JSON`：按 `model_id` 覆盖 profile
 
 ```json
 {
@@ -65,46 +114,38 @@ cargo run
 }
 ```
 
-## API
+### 8.4 HF 处理模式（预留）
+
+- `HF_PROCESSOR_MODE`：`disabled | python_sidecar`，默认 `disabled`
+- `HF_PYTHON_BIN`：Python 可执行文件，默认 `python3`
+- `HF_SIDECAR_SCRIPT`：sidecar 脚本路径，默认 `scripts/hf_processor_sidecar.py`
+
+## 9. API
 
 ### POST /v1/preprocess
 
-仅执行前处理并返回处理后的 JSON。
+仅执行前处理，返回处理后 payload。
 
 ### POST /v1/chat/completions
 
-- `RUN_MODE=preprocess_only`：返回处理后的 payload。
-- `RUN_MODE=proxy`：转发到 `${UPSTREAM_URL}/v1/chat/completions`。
+- preprocess_only：返回处理后 payload
+- proxy：转发到上游 SGLang chat completions
 
-转发时会附加头：
+转发时附加：
 
 - `x-mm-preprocessed: 1`
 
-## 错误码策略
+## 10. 测试
 
-- 媒体 load 阶段错误统一返回 **400**：
-  - base64 格式错误/解码失败
-  - 本地文件不存在或不可读
-  - URL 不合法或超时
-  - load 数据异常（格式/大小等）
-- 非 load 阶段的前处理错误返回 **500**（`Internal Server Error`）：
-  - 例如图像解码/重编码等处理流程异常
+```bash
+cargo test
+```
 
-## 指标（示例）
+当前已覆盖：
 
-- `gateway_requests_total`
-- `gateway_inflight`
-- `gateway_request_seconds`
-- `media_fetch_total`
-- `media_fetch_duration_seconds`
-- `media_preprocess_total`
-- `media_preprocess_duration_seconds`
-- `media_gateway_media_processed_total`
-
-## 下一步（与设计文档对齐）
-
-- 接入 Python Sidecar 池（F-05/F-06），补齐 HF AutoProcessor 语义对齐。
-- 增加视频采帧/音频解码轻量策略（F-07 扩展）。
-- 补充有界队列与背压（F-10）。
-- 增加 Sidecar 监督/重启与可重试策略（F-12）。
-- 引擎协同冻结 skip 契约与 golden 对比（F-30/F-31）。
+- data URL 解析
+- 本地文件不存在 -> 400
+- base64 异常 -> 400
+- 前处理异常 -> 500
+- proxy 模式下 skip header 转发
+- `audio_url` 形状兼容
