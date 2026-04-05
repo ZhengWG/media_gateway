@@ -3,7 +3,9 @@ use serde_json::Value;
 use crate::config::AppConfig;
 use crate::error::{GatewayError, Result};
 use crate::hf_sidecar::HfSidecarClient;
-use crate::media::{decode_data_url, encode_data_url, fetch_media, preprocess_image, MediaKind};
+use crate::media::{
+    decode_data_url, encode_data_url, fetch_media, preprocess_image_to_pixel_values, MediaKind,
+};
 use crate::models::ModelRegistry;
 
 pub struct PreprocessOutput {
@@ -146,7 +148,7 @@ async fn process_part(
         .await?
     };
     let normalized = match kind {
-        MediaKind::Image => preprocess_image(fetched, profile.target_image_edge)
+        MediaKind::Image => preprocess_image_to_pixel_values(fetched, profile.target_image_edge)
             .map_err(|e| GatewayError::Internal(format!("image preprocess failed: {e}")))?,
         MediaKind::Video | MediaKind::Audio => fetched,
     };

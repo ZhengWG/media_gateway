@@ -188,15 +188,55 @@ def _encode_data_url(mime: str, data: bytes) -> str:
     return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
 
 
-def _process_image_with_hf(processor: Any, raw: bytes) -> bytes:
-    # Reuse HF call path for model-specific image preprocess interface.
-    processor = _get_processor(model_id)
-    img = Image.open(io.BytesIO(raw)).convert("RGB")
-    _call_image_processor(processor, img)
+def _pixel_values_to_bytes(pixel_values: Any) -> bytes:
+    # Expect torch.Tensor-like object with shape [1, C, H, W] or [C, H, W].
+    try:
+        arr = pixel_values.detach().cpu().float().contiguous().numpy()
+    except Exception as e:  # noqa: BLE001
+        raise ValueError(f"unable to convert pixel_values tensor: {e}") from e
 
-    out = io.BytesIO()
-    img.save(out, format="JPEG", quality=90)
-    return out.getvalue()
+    if arr.ndim == 4 and arr.shape[0] == 1:
+        arr = arr[0]
+    if arr.ndim != 3:
+        raise ValueError(f"unexpected pixel_values shape: {arr.shape}")
+    # CHW float32 bytes.
+    return arr.astype("float32", copy=False).tobytes(order="C")
+
+
+def _process_image_with_hf(processor: Any, raw: bytes) -> Tuple[bytes, str]:
+    # Reuse HF call path for model-specific image preprocess interface and emit pixel_values bytes.
+    img = Image.open(io.BytesIO(raw)).convert("RGB")
+    enc = None
+    attempts = [
+        {"images": img, "return_tensors": "pt"},
+        {"images": [img], "return_tensors": "pt"},
+        {"text": "", "images": img, "return_tensors": "pt"},
+        {"text": [""], "images": [img], "return_tensors": "pt"},
+    ]
+    last_err: Optional[Exception] = None
+    for kwargs in attempts:
+        try:
+            enc = processor(**kwargs)
+            break
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+    if enc is None:
+        raise ValueError(f"HF image processor call failed: {last_err}")
+
+    if "pixel_values" not in enc:
+        raise ValueError("HF processor output does not include pixel_values")
+
+    pixel_values = enc["pixel_values"]
+    bytes_payload = _pixel_values_to_bytes(pixel_values)
+    shape = tuple(int(x) for x in pixel_values.shape)
+    if len(shape) == 4:
+        _, c, h, w = shape
+    elif len(shape) == 3:
+        c, h, w = shape
+    else:
+        raise ValueError(f"unexpected pixel_values shape: {shape}")
+    mime = f"application/x-pixel-values+f32;layout=nchw;shape=1x{c}x{h}x{w}"
+    return bytes_payload, mime
 
 
 def _handle(req: Dict[str, Any]) -> Dict[str, Any]:
@@ -217,8 +257,7 @@ def _handle(req: Dict[str, Any]) -> Dict[str, Any]:
     if kind == "image":
         if not capabilities.image:
             raise ValueError(f"processor for {model_id} does not support image inputs")
-        processed = _process_image_with_hf(model_id, raw)
-        mime = "image/jpeg"
+        processed, mime = _process_image_with_hf(processor, raw)
         path = "image_processor"
     elif kind == "video":
         if capabilities.video:

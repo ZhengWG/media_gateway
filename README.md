@@ -43,7 +43,7 @@
 
 ### 3.2 轻量前处理（当前）
 
-- 图片：按模型 profile 的目标边长缩放，并编码为 `image/jpeg`。
+- 图片：按模型 profile 的目标边长缩放后，输出 `pixel_values`（`float32`、`NCHW`）并编码为 base64 data URL，回写到 `image_url.url`。
 - 视频/音频：首期透传（只做加载与统一回写，不做重解码采样）。
 
 ## 4. HF Processor 接入模式

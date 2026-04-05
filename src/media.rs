@@ -1,7 +1,6 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use image::imageops::FilterType;
-use image::{DynamicImage, ImageFormat};
-use std::io::Cursor;
+use image::DynamicImage;
 use std::net::IpAddr;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -123,16 +122,27 @@ pub async fn fetch_media(
     Ok(MediaPayload { mime, bytes })
 }
 
-pub fn preprocess_image(payload: MediaPayload, target_edge: u32) -> Result<MediaPayload> {
+pub fn preprocess_image_to_pixel_values(
+    payload: MediaPayload,
+    target_edge: u32,
+) -> Result<MediaPayload> {
     let started = Instant::now();
     ensure_size_limit(payload.bytes.len(), usize::MAX)?;
     let img = image::load_from_memory(&payload.bytes)
         .map_err(|e| GatewayError::Internal(format!("decode image failed: {e}")))?;
     let resized = resize_keep_ratio(img, target_edge);
-    let mut out = Vec::new();
-    resized
-        .write_to(&mut Cursor::new(&mut out), ImageFormat::Jpeg)
-        .map_err(|e| GatewayError::Internal(format!("encode image failed: {e}")))?;
+    let rgb = resized.to_rgb8();
+    let (w, h) = rgb.dimensions();
+    let mut out = Vec::with_capacity((w as usize) * (h as usize) * 3 * std::mem::size_of::<f32>());
+    // NCHW float32 payload, aligned with common HF pixel_values layout.
+    for c in 0..3 {
+        for y in 0..h {
+            for x in 0..w {
+                let v = rgb.get_pixel(x, y).0[c] as f32 / 255.0;
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+    }
 
     metrics::histogram!(
         "media_preprocess_duration_seconds",
@@ -143,7 +153,10 @@ pub fn preprocess_image(payload: MediaPayload, target_edge: u32) -> Result<Media
     metrics::counter!("media_preprocess_total", "media_type" => "image").increment(1);
 
     Ok(MediaPayload {
-        mime: "image/jpeg".to_string(),
+        mime: format!(
+            "application/x-pixel-values+f32;layout=nchw;shape=1x3x{}x{}",
+            h, w
+        ),
         bytes: out,
     })
 }
@@ -304,7 +317,8 @@ fn map_http_load_error(e: reqwest::Error) -> GatewayError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{ImageBuffer, Rgb};
+    use image::{ImageBuffer, ImageFormat, Rgb};
+    use std::io::Cursor;
 
     #[test]
     fn data_url_roundtrip() {
@@ -331,5 +345,29 @@ mod tests {
         let resized = resize_keep_ratio(img, 1024);
         assert_eq!(resized.width(), 1024);
         assert_eq!(resized.height(), 512);
+    }
+
+    #[test]
+    fn preprocess_image_outputs_pixel_values_payload() {
+        let img =
+            image::DynamicImage::ImageRgb8(ImageBuffer::<Rgb<u8>, _>::from_fn(2, 2, |_, _| {
+                Rgb([255, 128, 0])
+            }));
+        let mut encoded = Vec::new();
+        img.write_to(&mut Cursor::new(&mut encoded), ImageFormat::Png)
+            .expect("png encode");
+
+        let out = preprocess_image_to_pixel_values(
+            MediaPayload {
+                mime: "image/png".to_string(),
+                bytes: encoded,
+            },
+            2,
+        )
+        .expect("preprocess");
+        assert!(out
+            .mime
+            .starts_with("application/x-pixel-values+f32;layout=nchw;shape=1x3x2x2"));
+        assert_eq!(out.bytes.len(), 2 * 2 * 3 * 4);
     }
 }
