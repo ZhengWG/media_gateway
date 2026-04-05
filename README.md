@@ -135,7 +135,110 @@ cargo run
 
 - `x-mm-preprocessed: 1`
 
-## 10. 测试
+## 10. 请求样例（可直接复制）
+
+以下示例默认本服务地址为 `http://127.0.0.1:8080`。
+
+### 10.1 preprocess_only + 本地文件（file://）
+
+```bash
+curl -sS "http://127.0.0.1:8080/v1/preprocess" \
+  -H "content-type: application/json" \
+  -d '{
+    "model": "qwen2-vl",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "describe image"},
+        {"type": "image_url", "image_url": {"url": "file:///tmp/demo.png"}}
+      ]
+    }]
+  }'
+```
+
+### 10.2 preprocess_only + 远程 URL
+
+```bash
+curl -sS "http://127.0.0.1:8080/v1/preprocess" \
+  -H "content-type: application/json" \
+  -d '{
+    "model": "qwen2-vl",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "what is in this image?"},
+        {"type": "image_url", "image_url": {"url": "https://example.com/demo.jpg"}}
+      ]
+    }]
+  }'
+```
+
+### 10.3 preprocess_only + base64(data URL)
+
+```bash
+IMG_B64="$(base64 -w0 /tmp/demo.png)"
+curl -sS "http://127.0.0.1:8080/v1/preprocess" \
+  -H "content-type: application/json" \
+  -d "{
+    \"model\": \"qwen2-vl\",
+    \"messages\": [{
+      \"role\": \"user\",
+      \"content\": [
+        {\"type\": \"text\", \"text\": \"analyze this\"},
+        {\"type\": \"image_url\", \"image_url\": {\"url\": \"data:image/png;base64,${IMG_B64}\"}}
+      ]
+    }]
+  }"
+```
+
+### 10.4 proxy 模式（转发到 SGLang）
+
+先启动服务（示例）：
+
+```bash
+export RUN_MODE=proxy
+export UPSTREAM_URL="http://127.0.0.1:30000"
+cargo run
+```
+
+请求：
+
+```bash
+curl -sS "http://127.0.0.1:8080/v1/chat/completions" \
+  -H "content-type: application/json" \
+  -d '{
+    "model": "qwen2-vl",
+    "stream": false,
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "summarize"},
+        {"type": "video_url", "video_url": {"url": "https://example.com/demo.mp4"}},
+        {"type": "audio_url", "audio_url": {"url": "https://example.com/demo.mp3"}}
+      ]
+    }]
+  }'
+```
+
+### 10.5 错误样例（应返回 400）
+
+本地文件不存在：
+
+```bash
+curl -i "http://127.0.0.1:8080/v1/preprocess" \
+  -H "content-type: application/json" \
+  -d '{
+    "model": "qwen2-vl",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "image_url", "image_url": {"url": "file:///tmp/not-found.png"}}
+      ]
+    }]
+  }'
+```
+
+## 11. 测试
 
 ```bash
 cargo test
