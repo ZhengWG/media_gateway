@@ -3,7 +3,9 @@ use serde_json::Value;
 use crate::config::AppConfig;
 use crate::error::{GatewayError, Result};
 use crate::hf_sidecar::HfSidecarClient;
-use crate::media::{decode_data_url, encode_data_url, fetch_media, preprocess_image, MediaKind};
+use crate::media::{
+    decode_data_url, encode_data_url, fetch_media, preprocess_image_to_pixel_values, MediaKind,
+};
 use crate::models::ModelRegistry;
 
 pub struct PreprocessOutput {
@@ -60,6 +62,7 @@ pub async fn preprocess_request(
                 &profile,
                 http_client,
                 hf_sidecar,
+                cfg.inject_processor_output,
                 profile.max_media_bytes,
                 cfg.fetch_timeout,
                 &cfg.allowed_hosts,
@@ -87,7 +90,47 @@ fn detect_media_kind(part_type: &str) -> Option<(&'static str, MediaKind)> {
         "image_url" => Some(("image_url", MediaKind::Image)),
         "video_url" => Some(("video_url", MediaKind::Video)),
         "audio" => Some(("audio", MediaKind::Audio)),
+        "audio_url" => Some(("audio_url", MediaKind::Audio)),
         _ => None,
+    }
+}
+
+fn allowed_processor_output_keys(kind: MediaKind) -> &'static [&'static str] {
+    match kind {
+        // Core image fields commonly consumed by SGLang multimodal processors.
+        MediaKind::Image => &["pixel_values", "image_grid_thw", "image_sizes"],
+        // Core video fields for processor_output-like video consumption.
+        MediaKind::Video => &[
+            "pixel_values_videos",
+            "video_grid_thw",
+            "second_per_grid_ts",
+        ],
+        // Core audio fields used by HF/SGLang-style audio processor pipelines.
+        MediaKind::Audio => &[
+            "input_features",
+            "audio_features",
+            "audio_feature_lens",
+            "input_features_mask",
+            "feature_attention_mask",
+            "audio_attention_mask",
+        ],
+    }
+}
+
+fn sanitize_processor_output(kind: MediaKind, processor_output: Value) -> Option<Value> {
+    let Value::Object(obj) = processor_output else {
+        return None;
+    };
+    let mut filtered = serde_json::Map::new();
+    for key in allowed_processor_output_keys(kind) {
+        if let Some(v) = obj.get(*key) {
+            filtered.insert((*key).to_string(), v.clone());
+        }
+    }
+    if filtered.is_empty() {
+        None
+    } else {
+        Some(Value::Object(filtered))
     }
 }
 
@@ -100,6 +143,7 @@ async fn process_part(
     profile: &crate::config::ModelProfile,
     http_client: &reqwest::Client,
     hf_sidecar: Option<&HfSidecarClient>,
+    inject_processor_output: bool,
     max_media_bytes: usize,
     fetch_timeout: std::time::Duration,
     allowed_hosts: &std::collections::HashSet<String>,
@@ -118,6 +162,7 @@ async fn process_part(
             "model": model_id,
             "kind": kind.as_str(),
             "url": raw_url,
+            "need_processor_output": inject_processor_output,
         });
         let sidecar_res = sidecar.preprocess(model_id, &sidecar_input).await?;
         let sidecar_url = sidecar_res
@@ -126,6 +171,13 @@ async fn process_part(
             .and_then(Value::as_str)
             .ok_or_else(|| GatewayError::Internal("hf sidecar payload missing url".to_string()))?;
         media_obj.insert("url".to_string(), Value::String(sidecar_url.to_string()));
+        if inject_processor_output {
+            if let Some(processor_output) = sidecar_res.processor_output {
+                if let Some(filtered) = sanitize_processor_output(kind, processor_output) {
+                    media_obj.insert("processor_output".to_string(), filtered);
+                }
+            }
+        }
         metrics::counter!("media_gateway_media_processed_total", "kind" => kind.as_str())
             .increment(1);
         return Ok(true);
@@ -145,7 +197,7 @@ async fn process_part(
         .await?
     };
     let normalized = match kind {
-        MediaKind::Image => preprocess_image(fetched, profile.target_image_edge)
+        MediaKind::Image => preprocess_image_to_pixel_values(fetched, profile.target_image_edge)
             .map_err(|e| GatewayError::Internal(format!("image preprocess failed: {e}")))?,
         MediaKind::Video | MediaKind::Audio => fetched,
     };

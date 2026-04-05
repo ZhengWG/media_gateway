@@ -45,6 +45,7 @@ fn test_config() -> config::AppConfig {
         hf_python_bin: "python3".to_string(),
         hf_sidecar_script: "scripts/hf_processor_sidecar.py".to_string(),
         hf_sidecar_timeout: Duration::from_secs(30),
+        inject_processor_output: false,
     }
 }
 
@@ -73,7 +74,7 @@ async fn preprocess_local_file_not_found_returns_400() {
     };
     let router = app::build_router(state);
     let payload = serde_json::json!({
-        "model": "demo",
+        "model": "Qwen/Qwen2.5-VL-3B-Instruct",
         "messages": [{
             "role": "user",
             "content": [{
@@ -105,7 +106,7 @@ async fn preprocess_bad_base64_returns_400() {
     };
     let router = app::build_router(state);
     let payload = serde_json::json!({
-        "model": "demo",
+        "model": "Qwen/Qwen2.5-VL-3B-Instruct",
         "messages": [{
             "role": "user",
             "content": [{
@@ -138,7 +139,7 @@ async fn preprocess_non_image_payload_returns_500() {
     let router = app::build_router(state);
     let bad_bytes = base64::engine::general_purpose::STANDARD.encode(b"not-an-image");
     let payload = serde_json::json!({
-        "model": "demo",
+        "model": "Qwen/Qwen2.5-VL-3B-Instruct",
         "messages": [{
             "role": "user",
             "content": [{
@@ -201,7 +202,7 @@ async fn proxy_mode_forwards_with_skip_header() {
     let b64 = base64::engine::general_purpose::STANDARD.encode(&buf);
     let payload = serde_json::json!({
         "upstream_url": format!("http://{addr}"),
-        "model": "demo",
+        "model": "Qwen/Qwen2.5-VL-3B-Instruct",
         "messages": [{
             "role": "user",
             "content": [{
@@ -233,7 +234,7 @@ async fn preprocess_supports_sglang_audio_url_shape() {
     };
     let router = app::build_router(state);
     let payload = serde_json::json!({
-        "model": "demo",
+        "model": "moonshotai/Kimi-VL-A3B-Instruct",
         "messages": [{
             "role": "user",
             "content": [{
@@ -253,6 +254,108 @@ async fn preprocess_supports_sglang_audio_url_shape() {
 }
 
 #[tokio::test]
+async fn preprocess_rejects_non_qwen_kimi_model() {
+    let cfg = test_config();
+    let state = app::AppState {
+        registry: models::ModelRegistry::from_config(&cfg),
+        http_client: reqwest::Client::new(),
+        metrics_handle: test_metrics_handle(),
+        config: cfg,
+        hf_sidecar: None,
+    };
+    let router = app::build_router(state);
+    let payload = serde_json::json!({
+        "model": "meta-llama/Llama-3.2-11B-Vision",
+        "messages": [{
+            "role": "user",
+            "content": [{"type":"text","text":"hello"}]
+        }]
+    });
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/preprocess")
+        .header("content-type", "application/json")
+        .body(Body::from(payload.to_string()))
+        .expect("request");
+    let resp = router.oneshot(req).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn preprocess_injects_processor_output_from_sidecar_when_enabled() {
+    let sidecar_app = Router::new().route(
+        "/sidecar",
+        post(|Json(_payload): Json<serde_json::Value>| async move {
+            Json(serde_json::json!({
+                "payload": {
+                    "url": "data:application/octet-stream;base64,aGVsbG8="
+                },
+                "changed_items": 1,
+                "processor_output": {
+                    "pixel_values": [[[[0.1, 0.2], [0.3, 0.4]]]],
+                    "attention_mask": [1, 1, 1],
+                    "input_ids": [10, 20, 30]
+                }
+            }))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind sidecar");
+    let addr = listener.local_addr().expect("sidecar addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, sidecar_app).await;
+    });
+
+    let mut cfg = test_config();
+    cfg.hf_processor_mode = config::HfProcessorMode::PythonSidecar;
+    cfg.inject_processor_output = true;
+    cfg.hf_sidecar_command_template = format!(
+        "python3 -c \"import json,sys,urllib.request; req=json.loads(sys.stdin.readline()); r=urllib.request.Request('http://{addr}/sidecar', data=json.dumps(req).encode('utf-8'), headers={{'content-type':'application/json'}}); print(urllib.request.urlopen(r, timeout=5).read().decode('utf-8'))\""
+    );
+
+    let state = app::AppState {
+        registry: models::ModelRegistry::from_config(&cfg),
+        http_client: reqwest::Client::new(),
+        metrics_handle: test_metrics_handle(),
+        config: cfg.clone(),
+        hf_sidecar: Some(hf_sidecar::HfSidecarClient::new(
+            cfg.hf_sidecar_command_template.clone(),
+            cfg.hf_sidecar_timeout,
+        )),
+    };
+    let router = app::build_router(state);
+    let payload = serde_json::json!({
+        "model": "Qwen/Qwen2.5-VL-3B-Instruct",
+        "messages": [{
+            "role": "user",
+            "content": [{
+                "type": "image_url",
+                "image_url": { "url": "data:image/png;base64,aGVsbG8=" }
+            }]
+        }]
+    });
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/preprocess")
+        .header("content-type", "application/json")
+        .body(Body::from(payload.to_string()))
+        .expect("request");
+    let resp = router.oneshot(req).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let v: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    let part = &v["payload"]["messages"][0]["content"][0]["image_url"];
+    assert!(part.get("processor_output").is_some());
+    let po = &part["processor_output"];
+    assert!(po.get("pixel_values").is_some());
+    assert!(po.get("attention_mask").is_none());
+    assert!(po.get("input_ids").is_none());
+}
+
+#[tokio::test]
 async fn proxy_mode_requires_upstream_url_in_body() {
     let cfg = test_config();
     let mut cfg = cfg;
@@ -266,7 +369,7 @@ async fn proxy_mode_requires_upstream_url_in_body() {
     };
     let router = app::build_router(state);
     let payload = serde_json::json!({
-        "model": "demo",
+        "model": "Qwen/Qwen2.5-VL-3B-Instruct",
         "messages": [{
             "role": "user",
             "content": [{"type":"text","text":"hello"}]

@@ -16,6 +16,7 @@ pub struct HfSidecarClient {
 pub struct HfSidecarResult {
     pub payload: Value,
     pub changed_items: Option<usize>,
+    pub processor_output: Option<Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -29,6 +30,8 @@ struct HfSidecarResponse {
     payload: Value,
     #[serde(default)]
     changed_items: Option<usize>,
+    #[serde(default)]
+    processor_output: Option<Value>,
 }
 
 impl HfSidecarClient {
@@ -113,5 +116,6 @@ fn run_sidecar_once(sidecar_cmd: &str, model_id: &str, payload: &Value) -> Resul
     Ok(HfSidecarResult {
         payload: parsed.payload,
         changed_items: parsed.changed_items,
+        processor_output: parsed.processor_output,
     })
 }

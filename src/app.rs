@@ -267,7 +267,7 @@ mod tests {
 
     #[test]
     fn extract_upstream_url_missing() {
-        let payload = serde_json::json!({"model":"demo"});
+        let payload = serde_json::json!({"model":"Qwen/Qwen2.5-VL-3B-Instruct"});
         let err = extract_upstream_url(&payload).expect_err("should fail");
         assert!(format!("{err}").contains("upstream_url"));
     }
