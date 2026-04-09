@@ -1,12 +1,11 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use image::imageops::FilterType;
-use image::DynamicImage;
 use std::net::IpAddr;
 use std::path::Path;
 use std::time::{Duration, Instant};
 use url::Url;
 
 use crate::error::{GatewayError, Result};
+use crate::preprocess_ops::image::image_to_pixel_values_nchw_f32;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum MediaKind {
@@ -128,21 +127,7 @@ pub fn preprocess_image_to_pixel_values(
 ) -> Result<MediaPayload> {
     let started = Instant::now();
     ensure_size_limit(payload.bytes.len(), usize::MAX)?;
-    let img = image::load_from_memory(&payload.bytes)
-        .map_err(|e| GatewayError::Internal(format!("decode image failed: {e}")))?;
-    let resized = resize_keep_ratio(img, target_edge);
-    let rgb = resized.to_rgb8();
-    let (w, h) = rgb.dimensions();
-    let mut out = Vec::with_capacity((w as usize) * (h as usize) * 3 * std::mem::size_of::<f32>());
-    // NCHW float32 payload, aligned with common HF pixel_values layout.
-    for c in 0..3 {
-        for y in 0..h {
-            for x in 0..w {
-                let v = rgb.get_pixel(x, y).0[c] as f32 / 255.0;
-                out.extend_from_slice(&v.to_le_bytes());
-            }
-        }
-    }
+    let (out, h, w) = image_to_pixel_values_nchw_f32(&payload.bytes, target_edge)?;
 
     metrics::histogram!(
         "media_preprocess_duration_seconds",
@@ -176,21 +161,6 @@ pub fn detect_image_format(payload: &MediaPayload) -> Result<String> {
     Err(GatewayError::MediaLoad(
         "unsupported image format, expected jpeg/png/webp".into(),
     ))
-}
-
-fn resize_keep_ratio(img: DynamicImage, target_edge: u32) -> DynamicImage {
-    let (w, h) = (img.width(), img.height());
-    if w <= target_edge && h <= target_edge {
-        return img;
-    }
-    let scale = if w > h {
-        target_edge as f32 / w as f32
-    } else {
-        target_edge as f32 / h as f32
-    };
-    let nw = ((w as f32) * scale).round().max(1.0) as u32;
-    let nh = ((h as f32) * scale).round().max(1.0) as u32;
-    img.resize_exact(nw, nh, FilterType::Lanczos3)
 }
 
 fn validate_remote_url(
@@ -342,7 +312,7 @@ mod tests {
             1000,
             |_, _| Rgb([255, 0, 0]),
         ));
-        let resized = resize_keep_ratio(img, 1024);
+        let resized = crate::preprocess_ops::image::resize_keep_ratio(img, 1024);
         assert_eq!(resized.width(), 1024);
         assert_eq!(resized.height(), 512);
     }

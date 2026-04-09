@@ -51,6 +51,18 @@
 - 图片：按模型 profile 的目标边长缩放后，输出 `pixel_values`（`float32`、`NCHW`）并编码为 base64 data URL，回写到 `image_url.url`。
 - 视频/音频：首期透传（只做加载与统一回写，不做重解码采样）。
 
+### 3.3 预处理模块化（统一加速入口）
+
+已将图片 resize 与视频采样入口抽离到独立模块：
+
+- `src/preprocess_ops/image.rs`
+- `src/preprocess_ops/video.rs`
+
+当前加速策略：
+
+- 图片 `pixel_values` 打包使用并行通道处理（`rayon`），降低 CPU 热点路径耗时；
+- 视频路径统一经过 `preprocess_ops::video`（当前保持透传语义），为后续 ffmpeg/decord 抽帧优化保留稳定接口。
+
 ## 4. HF Processor 接入模式
 
 当前提供了 **HF Sidecar 预留接入位**（`hf_sidecar` 模块）：

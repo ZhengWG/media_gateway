@@ -7,6 +7,7 @@ use crate::media::{
     decode_data_url, encode_data_url, fetch_media, preprocess_image_to_pixel_values, MediaKind,
 };
 use crate::models::ModelRegistry;
+use crate::preprocess_ops::video::{preprocess_video, VideoSamplePolicy};
 
 pub struct PreprocessOutput {
     pub payload: Value,
@@ -199,7 +200,18 @@ async fn process_part(
     let normalized = match kind {
         MediaKind::Image => preprocess_image_to_pixel_values(fetched, profile.target_image_edge)
             .map_err(|e| GatewayError::Internal(format!("image preprocess failed: {e}")))?,
-        MediaKind::Video | MediaKind::Audio => fetched,
+        MediaKind::Video => {
+            preprocess_video(
+                fetched,
+                VideoSamplePolicy {
+                    max_frames: 8,
+                    frame_interval: 2,
+                },
+            )
+            .map_err(|e| GatewayError::Internal(format!("video preprocess failed: {e}")))?
+            .payload
+        }
+        MediaKind::Audio => fetched,
     };
     media_obj.insert(
         "url".to_string(),

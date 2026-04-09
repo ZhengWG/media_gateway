@@ -5,6 +5,7 @@ mod hf_sidecar;
 mod media;
 mod models;
 mod pipeline;
+mod preprocess_ops;
 
 use metrics_exporter_prometheus::PrometheusBuilder;
 use std::sync::Arc;

@@ -24,6 +24,8 @@ mod media;
 mod models;
 #[path = "../src/pipeline.rs"]
 mod pipeline;
+#[path = "../src/preprocess_ops/mod.rs"]
+mod preprocess_ops;
 
 fn test_config() -> config::AppConfig {
     config::AppConfig {
